@@ -72,9 +72,16 @@ func runUDPServer() {
 func handleUDPFileTransfer(conn *net.UDPConn) {
 	buffer := make([]byte, BUFFER_SIZE+20) // Extra space for headers
 
+	// Set initial timeout for header
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	// Read first packet (should contain file header)
 	n, clientAddr, err := conn.ReadFromUDP(buffer)
 	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			fmt.Println("Timeout waiting for client connection")
+			return
+		}
 		fmt.Printf("Error reading from UDP: %v\n", err)
 		return
 	}
@@ -123,19 +130,30 @@ func handleUDPFileTransfer(conn *net.UDPConn) {
 	var totalReceived uint64
 	expectedSeqNum := uint32(0)
 	receivedPackets := make(map[uint32][]byte)
-
-	conn.SetReadDeadline(time.Now().Add(TIMEOUT))
+	consecutiveTimeouts := 0
+	maxConsecutiveTimeouts := 3
 
 	for totalReceived < fileSize {
+		// Set timeout for each packet
+		conn.SetReadDeadline(time.Now().Add(TIMEOUT))
+
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				fmt.Println("Timeout waiting for data packet")
-				break
+				consecutiveTimeouts++
+				fmt.Printf("Timeout waiting for data packet (attempt %d/%d)\n", consecutiveTimeouts, maxConsecutiveTimeouts)
+				if consecutiveTimeouts >= maxConsecutiveTimeouts {
+					fmt.Println("Too many consecutive timeouts, ending transfer")
+					break
+				}
+				continue
 			}
 			fmt.Printf("Error reading data packet: %v\n", err)
 			break
 		}
+
+		// Reset timeout counter on successful read
+		consecutiveTimeouts = 0
 
 		if n < 8 { // Minimum packet header size
 			continue
@@ -188,16 +206,16 @@ func handleUDPFileTransfer(conn *net.UDPConn) {
 		}
 
 		if isLast {
+			fmt.Println("\nReceived last packet, transfer complete")
 			break
 		}
-
-		// Reset timeout
-		conn.SetReadDeadline(time.Now().Add(TIMEOUT))
 	}
 
 	duration := time.Since(startTime)
 	fmt.Printf("\nFile transfer completed in %v\n", duration)
-	fmt.Printf("Average speed: %.2f KB/s\n", float64(totalReceived)/1024/duration.Seconds())
+	if duration.Seconds() > 0 {
+		fmt.Printf("Average speed: %.2f KB/s\n", float64(totalReceived)/1024/duration.Seconds())
+	}
 	fmt.Printf("File saved as: %s\n", outputPath)
 	fmt.Printf("Received %d/%d bytes\n", totalReceived, fileSize)
 	fmt.Println("---")
